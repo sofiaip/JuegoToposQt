@@ -1,138 +1,27 @@
 #include "mbed.h"
-#include <stdlib.h>
+#include <stdbool.h>
 
-/**
- * @brief Union de estructura que contiene un mapa de bit
- * se usa para banderas
- * 
- */
-typedef union{
-    struct{
-        unsigned char b0: 1;
-        unsigned char b1: 1;
-        unsigned char b2: 1;
-        unsigned char b3: 1;
-        unsigned char b4: 1;
-        unsigned char b5: 1;
-        unsigned char b6: 1;
-        unsigned char b7: 1;
-    }bit;
-    unsigned char byte;
-}_flag;
+#define NUMBUTT             4
 
-/**
- * @brief Declaro mi flag
- * 
- */
-_flag flag1;
+#define MAXLED              4
 
-/**
- * @brief Defino valor encendido-apagado
- * 
- */
-#define ON          1
-#define OFF         0
+#define NUMBEAT             4
 
-/**
- * @brief Defino valor para cuando una sentencia es verdadera o falsa
- * 
- */
+#define HEARBEATINTERVAL    100
+
 #define TRUE        1
 #define FALSE       0
 
-/**
- * @brief Defino el intervalo entre lecturas para "filtrar" el ruido del Botón
- * 
- */
 #define INTERVAL    40
 
-/**
- * @brief Defino el intervalo entre latidos del hearbeat
- * 
- */
 #define MS          200
-/**
- * @brief Defino el intervalo de espera al presionar una tecla
- * 
- */
-#define TPRESS      1000 
-/**
- * @brief Defino minimo valor del tiempo aleatorio
- * 
- */   
-#define BASETIME    500
-/**
- * @brief Defino maximo valor del tiempo aleatorio
- * 
- */
-#define TIMEMAX     1501
-/**
- * @brief Defino el numero de leds
- * 
- */
-#define MAXLED      4
-/**
- * @brief Defino el numero de botones
- * 
- */
-#define NUMBOTONES  4
-/**
- * @brief Defino el intervalo entre latidos del hearbeat
- * 
- */
 
-/**
- * @brief defino los valores de la maquina de estado
- * 
- */
-#define ESPERAR         0
-#define JUEGO           1
-#define JUEGOTERMINADO  2
-#define TECLAS          3
 
-/**
- * @brief Defino el intervalo de destello al finalizar el juego
- * 
- */
-#define FINISHED        500
-/**
- * @brief Defino cantidad de destellos +1
- * Comienza con led en 0 
- * Enciende 3 veces
- * Apaga 3 veces
- */
-#define DESTELLOS       7
-/**
- * @brief Defino valor de todos los leds
- * 
- */
-#define TOTALLED        15
 
-/**
- * @brief Bandera para identificar si fue presionado el boton correcto
- * 1 = boton correcto
- * 0 = boton incorrecto
- */
-#define RIGHTPRESS      flag1.bit.b0
-/**
- * @brief Bandera para identificar si se gano el juego
- * 1 = verdadero
- * 0 = falso
- */
-#define WON             flag1.bit.b1
-/**
- * @brief Bandera para identificar si se empezo el juego
- * 1 = verdadero
- * 0 = falso
- */
-#define GAMEON          flag1.bit.b2 
-/**
-* @brief Bandera para identificar el estado del led
- * 1 = encendido
- * 0 = apagado
- */
-#define STATE           flag1.bit.b3    
-   
+
+
+
+
 /**
  * @brief Enumeración que contiene los estados de la máquina de estados(MEF) que se implementa para 
  * el "debounce" 
@@ -140,48 +29,137 @@ _flag flag1;
  * y cambia a valor lógico 0 cuando es presionado.
  */
 typedef enum{
-    BUTTON_DOWN,//0
-    BUTTON_UP,//1
-    BUTTON_FALLING,//2
-    BUTTON_RISING//3
+    BUTTON_DOWN,    //0
+    BUTTON_UP,      //1
+    BUTTON_FALLING, //2
+    BUTTON_RISING   //3
 }_eButtonState;
 
 /**
- * @brief Estructura para reconocer el estado de un boton
- * para conocer su tiempo presionado
- * y la diferencia de tiempo
+ * @brief Enumeración de eventos del botón
+ * Se usa para saber si el botón está presionado o nó
+ */
+typedef enum{
+    EV_PRESSED,
+    EV_NOT_PRESSED,
+    EV_NONE
+}_eButtonEvent;
+
+/**
+ * @brief Esturctura de Teclas
+ * 
  */
 typedef struct{
-    uint8_t estado;
+    _eButtonState estado;
+    _eButtonEvent event;
     int32_t timeDown;
-    int32_t timeDiff;
+    int32_t timeUP;
 }_sTeclas;
 
+_sTeclas ourButton[NUMBUTT];
+//                0001 ,  0010,  0100,  1000
+
+    typedef struct{
+        uint8_t ledState;
+    }_sLeds;
+    
+    _sLeds myLeds[MAXLED];
+
+
+uint16_t mask[]={0x0001,0x0002,0x0004,0x0008};
 
 /**
- * @brief Declaro array de tipo _sTeclas del tamanio de la cantidad de botones 
+ * @brief Enumeración de la MEF para decodificar el protocolo
  * 
  */
-_sTeclas ourButton[NUMBOTONES];
+typedef enum{
+    START,
+    HEADER_1,
+    HEADER_2,
+    HEADER_3,
+    NBYTES,
+    TOKEN,
+    PAYLOAD
+}_eProtocolo;
+
+_eProtocolo estadoProtocolo;
 
 /**
- * @brief Dato del tipo uint16_t para uso de mascara
+ * @brief Enumeración de la lista de comandos
  * 
  */
-uint16_t mask[] = {0x0001,0x0002,0x0004,0x0008,0xF};
+ typedef enum{
+        ACK=0x0D,
+        ALIVE=0xF0,
+        BUTTON_EVENT=0XFA,
+        GET_LEDS=0xFB,
+        SET_LEDS=0xFC,
+        BUTTON_STATE=0xFD,
+        OTHERS
+    }_eID;
 
 /**
- * @brief Dato del tipo uint8_t para controlar la maquina de estados
+ * @brief Estructura de datos para el puerto serie
  * 
  */
-uint8_t estadoJuego=ESPERAR;
+typedef struct{
+    uint8_t timeOut;         //!< TiemOut para reiniciar la máquina si se interrumpe la comunicación
+    uint8_t cheksumRx;       //!< Cheksumm RX
+    uint8_t cheksumtx;       //!< Cheksumm Tx
+    uint8_t indexWriteRx;    //!< Indice de escritura del buffer circular de recepción
+    uint8_t indexReadRx;     //!< Indice de lectura del buffer circular de recepción
+    uint8_t indexWriteTx;    //!< Indice de escritura del buffer circular de transmisión
+    uint8_t indexReadTx;     //!< Indice de lectura del buffer circular de transmisión
+    uint8_t bufferRx[256];   //!< Buffer circular de recepción
+    uint8_t bufferTx[256];   //!< Buffer circular de transmisión
+    uint8_t payload[32];     //!< Buffer para el Payload de datos recibidos
+}_sDato ;
+
+volatile _sDato datosComProtocol;
+
 
 
 /**
- * @brief Dato del tipo Enum para asignar los estados de la MEF
+ * @brief Mapa de bits para implementar banderas
+ * Como uso una sola los 7 bits restantes los dejo reservados para futuras banderas
+ */
+typedef union{
+    struct{
+        uint8_t checkButtons :1;
+        uint8_t Reserved :7;
+    }individualFlags;
+    uint8_t allFlags;
+}_bGeneralFlags;
+
+volatile _bGeneralFlags myFlags;
+
+uint8_t hearBeatEvent;
+
+/**
+ * @brief Unión para descomponer/componer datos mayores a 1 byte
  * 
  */
-_eButtonState myButton;
+typedef union {
+    int32_t i32;
+    uint32_t ui32;
+    uint16_t ui16[2];
+    uint8_t ui8[4];
+}_udat;
+
+_udat myWord;
+_udat timerRead;
+
+
+
+
+/*************************************************************************************************/
+/* Prototipo de Funciones */
+
+/**
+ * @brief Inicializa la MEF
+ * Le dá un estado inicial a myButton
+ */
+void startMef();
 
 /**
  * @brief Máquina de Estados Finitos(MEF)
@@ -189,262 +167,391 @@ _eButtonState myButton;
  * 
  * @param buttonState Este parámetro le pasa a la MEF el estado del botón.
  */
-void actuallizaMef(uint8_t indice); 
+void actuallizaMef();
 
 /**
- * @brief Inicializa la MEF
- * Le dá un estado inicial a myButton
+ * @brief Enciende o apaga los leds
+ * Se envian las posiciones de los leds que se quieren encender 
  */
-void startMef(uint8_t indice);
+void manejadorLed();
 
 /**
- * @brief Función para cambiar el estado del LED cada vez que sea llamada.
- * 
+ * @brief Función que se llama en la interrupción de recepción de datos
+ * Cuando se llama la fucnión se leen todos los datos que llagaron.
  */
-void togleLed(uint8_t indice,uint8_t state);
+void onDataRx(void);
 
 /**
- * @brief Identifico las entradas asignada a los botones
- * 
+ * @brief Decodifica las tramas que se reciben 
+ * La función decodifica el protocolo para saber si lo que llegó es válido.
+ * Utiliza una máquina de estado para decodificar el paquete
  */
-BusIn botones(PB_6,PB_7,PB_8,PB_9);
+void decodeProtocol(void);
+
 /**
- * @brief Identifico las salidas asignada a los leds
- * 
+ * @brief Procesa el comando (ID) que se recibió
+ * Si el protocolo es correcto, se llama a esta función para procesar el comando
  */
+void decodeData(void);
+
+/**
+ * @brief Envía los datos a la PC
+ * La función consulta si el puerto serie está libra para escribir, si es así envía 1 byte y retorna
+ */
+void sendData(void);
+
+/**
+ * @brief Función que se llama con la interrupción del TICKER
+ * maneja el tiempo de debounce de los botones, cambia un falg cada vez que se deben revisar los botones
+ */
+void OnTimeOut(void);
+
+/**
+ * @brief Función Hearbeat
+ * Ejecuta las tareas del hearbeat 
+ */
+void hearbeatTask(void);
+
+/*****************************************************************************************************/
+/* Configuración del Microcontrolador */
+
+BusIn buttonArray(PB_6,PB_7,PB_8,PB_9);
+
 BusOut leds(PB_12,PB_13,PB_14,PB_15);
 
-/**
- * @brief defino la salida para el Hearbeat(led)
- * 
- */
-DigitalOut HearBeat(PC_13);
+DigitalOut HEARBEAT(PC_13); //!< Defino la salida del led
 
-/**
- * @brief variable donde voy a almacenar el tiempo del timmer una vez cumplido
- * 
- */
-Timer miTimer;
+Serial pcCom(PA_9,PA_10,115200); //!< Configuración del puerto serie, la velocidad (115200) tiene que ser la misma en QT
+
+Timer miTimer; //!< Timer general
+
+Ticker timerGeneral;
+
+uint8_t numLed=0;
+uint8_t indice=0;
+uint8_t flanco= ourButton[indice].estado;
+/*****************************************************************************************************/
+/************  Función Principal ***********************/
 
 
-int tiempoMs = 0;
+int main()
+{
+    int hearbeatTime=0;
 
-int main(){
     miTimer.start();
 
-    WON=0;
-    GAMEON=0;
-    RIGHTPRESS=0;
-    STATE=0;
+    myFlags.individualFlags.checkButtons=false;
 
-    int tiempoBeat=0;
-    int tiempoF=0;
-    int cont=0;
-    
-    uint16_t ledAuxRandom=0;
-    
-    uint16_t ledAuxRandomTime=0;
-    
-    uint8_t indiceAux=0;
+    hearBeatEvent=0;
+   
+    pcCom.attach(&onDataRx,Serial::RxIrq);
 
-    uint8_t indicePress;
+    timerGeneral.attach_us(&OnTimeOut, 50000);
 
-    int tiempoRandom=0;
-    
-    int ledAuxJuegoStart=0;
-    
-    
-    for(uint8_t indice=0; indice<NUMBOTONES;indice++){
-      startMef(indice);  
+    for(indice=0; indice<NUMBUTT;indice++){
+        startMef();
     }
 
-    while(TRUE){
+    while(TRUE)
+    {
 
-        switch(estadoJuego){
-            case ESPERAR:
-                    if((miTimer.read_ms()-tiempoMs) > INTERVAL){
-                        tiempoMs = miTimer.read_ms(); 
-                        for(uint8_t indice = 0; indice <NUMBOTONES;indice++){
-                            actuallizaMef(indice);
-                            if(ourButton[indice].timeDiff >= TPRESS){
-                                srand(miTimer.read_us());
-                                estadoJuego = TECLAS;
-                                for(uint8_t indice=0; indice<NUMBOTONES;indice++ ){
-                                    startMef(indice);
-                                }
-                            } 
-                        }
-                    }
-
-            
-            break;
-            case TECLAS:
-                        for(indiceAux=0; indiceAux<NUMBOTONES; indiceAux++){
-                            actuallizaMef(indiceAux);
-                            if(ourButton[indiceAux].estado!=BUTTON_UP)
-                                break;
-                        }
-                        if(indiceAux==NUMBOTONES){
-                            leds=TOTALLED;
-                            ledAuxJuegoStart = miTimer.read_ms();
-                            estadoJuego = JUEGO;
-                            for(uint8_t indice=0; indice<NUMBOTONES;indice++ ){//
-                                    startMef(indice);
-                            }
-                            
-                        }
-                        
-                        
-            break;
-            case JUEGO:
-                if(leds==0){
-                    if((miTimer.read_ms()-ledAuxJuegoStart)>TPRESS){
-                        GAMEON=1;
-                    }
-                    if(GAMEON){
-                        ledAuxRandom = rand() % (MAXLED);
-                        togleLed(ledAuxRandom,ON);
-                        ledAuxRandomTime = (rand() % (TIMEMAX))+BASETIME;
-                        tiempoRandom=miTimer.read_ms();
-                        leds=mask[ledAuxRandom];
-                    }
+        if(myFlags.individualFlags.checkButtons){
+            myFlags.individualFlags.checkButtons=false;
+            for(indice=0; indice < NUMBUTT; indice++){
+                if (buttonArray & mask[indice]){
+                    ourButton[indice].event =EV_NOT_PRESSED;
                 }else{
-                    if(leds==15){
-                        if((miTimer.read_ms()-ledAuxJuegoStart)>TPRESS){
-                            ledAuxJuegoStart=miTimer.read_ms();
-                            leds=0;
-                        }
-                    }
+                    ourButton[indice].event =EV_PRESSED; 
                 }
-                
-               
-                for(indicePress = 0; indicePress<NUMBOTONES;indicePress++){
-                                actuallizaMef(indicePress);
-                                if(ourButton[indicePress].estado == BUTTON_DOWN){
-                                    if(indicePress == ledAuxRandom){
-                                        RIGHTPRESS=1;
-                                    }
-                                    if(indicePress != ledAuxRandom){
-                                        RIGHTPRESS=0;
-                                        break;
-                                    }
-                                }
-                }
-                  
-                
-                if((miTimer.read_ms()-tiempoRandom)>ledAuxRandomTime && GAMEON){
-                    leds=0;
-                    if(RIGHTPRESS==1){
-                        WON = 1;
-                    }else{
-                        WON=0;
-                    }
-                    estadoJuego = JUEGOTERMINADO;
-                }
-                
-            break;
-            case JUEGOTERMINADO:
-                if(WON){
-                    if((miTimer.read_ms()-tiempoF)>FINISHED){
-                        togleLed(MAXLED,STATE);
-                        tiempoF=miTimer.read_ms();
-                        STATE=!STATE;
-                        cont++;
-                    }
-                    
-                    
-                }else{
-                    if((miTimer.read_ms()-tiempoF)>FINISHED){
-                            togleLed(ledAuxRandom,STATE);
-                            tiempoF=miTimer.read_ms();
-                            STATE=!STATE;
-                            cont++;
-                        }
-                    }
-                    if(cont==DESTELLOS){
-                        for(uint8_t indice=0; indice<NUMBOTONES;indice++){
-                            startMef(indice); 
-                            ourButton[indice].timeDiff = 0;
-                            ourButton[indice].timeDown=0;
-                        }
-                        tiempoF = miTimer.read_ms();
-                        cont=0;
-                        leds=0;
-                        GAMEON=0;
-                        estadoJuego=ESPERAR;
-                    }
-                
-            break;
-            default :
-                    estadoJuego = ESPERAR;
+                actuallizaMef();
+            }
         }
-        
-       if((miTimer.read_ms()-tiempoBeat) > MS ){
-           
-           tiempoBeat = miTimer.read_ms();
-           HearBeat = !HearBeat;
+        if ((miTimer.read_ms()-hearbeatTime)>=HEARBEATINTERVAL){
+            hearbeatTime=miTimer.read_ms();
+            hearbeatTask();
+            
+        }
+        if(datosComProtocol.indexReadRx!=datosComProtocol.indexWriteRx) 
+            decodeProtocol();
 
-       }
+        if(datosComProtocol.indexReadTx!=datosComProtocol.indexWriteTx) 
+            sendData();
 
-      
-       
-
-
-    
     }
+
+
+
+
     return 0;
 }
 
-void startMef(uint8_t indice){  
-    ourButton[indice].estado = BUTTON_UP;
+
+/*****************************************************************************************************/
+/************  MEF para DEBOUNCE de botones ***********************/
+
+void startMef(){
+   ourButton[indice].estado=BUTTON_UP;
 }
 
-void actuallizaMef(uint8_t indice){
 
-    switch ((ourButton[indice].estado)){
-        case BUTTON_DOWN:
+void actuallizaMef(){
+
+    switch (ourButton[indice].estado)
+    {
+    case BUTTON_DOWN:
+        if(ourButton[indice].event )
+           ourButton[indice].estado=BUTTON_RISING;
+
+    break;
+    case BUTTON_UP:
+        if(!(ourButton[indice].event))
+            ourButton[indice].estado=BUTTON_FALLING;
+    break;
+    case BUTTON_FALLING:
+        if(!(ourButton[indice].event))
+        {
+            ourButton[indice].timeDown=miTimer.read_ms();
+            ourButton[indice].estado=BUTTON_DOWN;
+            datosComProtocol.payload[1] = BUTTON_EVENT;
+            flanco = BUTTON_DOWN;
             
-            if(botones.read() & mask[indice]){
-                ourButton[indice].estado = BUTTON_RISING;
-                
+            decodeData();
+            
+            //Flanco de bajada
+        }
+        else
+            ourButton[indice].estado=BUTTON_UP;  
+
+    break;
+    case BUTTON_RISING:
+        if(ourButton[indice].event){
+            ourButton[indice].estado=BUTTON_UP;
+            //Flanco de Subida
+            flanco = BUTTON_UP;
+            ourButton[indice].timeUP=miTimer.read_ms();
+            datosComProtocol.payload[1] = BUTTON_EVENT;
+            decodeData();
+
+        }
+
+        else
+            ourButton[indice].estado=BUTTON_DOWN;
+    
+    break;
+    
+    default:
+    startMef();
+        break;
+    }
+}
+
+
+/*****************************************************************************************************/
+/************  Funciónes para manejar los LEDS ***********************/
+
+
+
+void manejadorLed (){
+    uint16_t ledsAux=leds, auxmask=0;
+    auxmask |= 1<<numLed;
+    if((auxmask & leds) && myLeds[numLed].ledState==0){
+        ledsAux &= ~(1 << (numLed)) ; 
+    }else{
+        if((auxmask & leds)==0 && myLeds[numLed].ledState==1){
+         ledsAux |= 1 << (numLed) ;
+        }
+    }
+    leds = ledsAux ;
+}
+
+
+
+
+/*****************************************************************************************************/
+/************  MEF para decodificar el protocolo serie ***********************/
+void decodeProtocol(void)
+{
+    static int8_t nBytes=0, indice=0;
+    while (datosComProtocol.indexReadRx!=datosComProtocol.indexWriteRx)
+    {
+        switch (estadoProtocolo) {
+            case START:
+                if (datosComProtocol.bufferRx[datosComProtocol.indexReadRx++]=='U'){
+                    estadoProtocolo=HEADER_1;
+                    datosComProtocol.cheksumRx=0;
+                }
+                break;
+            case HEADER_1:
+                if (datosComProtocol.bufferRx[datosComProtocol.indexReadRx++]=='N')
+                   estadoProtocolo=HEADER_2;
+                else{
+                    datosComProtocol.indexReadRx--;
+                    estadoProtocolo=START;
+                }
+                break;
+            case HEADER_2:
+                if (datosComProtocol.bufferRx[datosComProtocol.indexReadRx++]=='E')
+                    estadoProtocolo=HEADER_3;
+                else{
+                    datosComProtocol.indexReadRx--;
+                   estadoProtocolo=START;
+                }
+                break;
+        case HEADER_3:
+            if (datosComProtocol.bufferRx[datosComProtocol.indexReadRx++]=='R')
+                estadoProtocolo=NBYTES;
+            else{
+                datosComProtocol.indexReadRx--;
+               estadoProtocolo=START;
             }
-        break;
-        case BUTTON_UP:
-            if(!(botones.read() & mask[indice]))
-                ourButton[indice].estado = BUTTON_FALLING;
-        
-        break;
-        case BUTTON_FALLING:
-            if(!(botones.read() & mask[indice])){
-                ourButton[indice].estado = BUTTON_DOWN;
-                //Flanco de bajada
-                ourButton[indice].timeDown = miTimer.read_ms();
-            }
-            else
-                ourButton[indice].estado = BUTTON_UP;    
-        break;
-        case BUTTON_RISING:
-            if(botones.read() & mask[indice]){
-                ourButton[indice].estado  = BUTTON_UP;
-                //Flanco de Subida
-                ourButton[indice].timeDiff = miTimer.read_ms()-ourButton[indice].timeDown;
-               
-                
-            }
-            else
-                ourButton[indice].estado = BUTTON_DOWN;
-        break;
-        
+            break;
+            case NBYTES:
+                nBytes=datosComProtocol.bufferRx[datosComProtocol.indexReadRx++];
+               estadoProtocolo=TOKEN;
+                break;
+            case TOKEN:
+                if (datosComProtocol.bufferRx[datosComProtocol.indexReadRx++]==':'){
+                   estadoProtocolo=PAYLOAD;
+                    datosComProtocol.cheksumRx ='U'^'N'^'E'^'R'^ nBytes^':';
+                    datosComProtocol.payload[0]=nBytes;
+                    indice=1;
+                }
+                else{
+                    datosComProtocol.indexReadRx--;
+                    estadoProtocolo=START;
+                }
+                break;
+            case PAYLOAD:
+                if (nBytes>1){
+                    datosComProtocol.payload[indice++]=datosComProtocol.bufferRx[datosComProtocol.indexReadRx];
+                    datosComProtocol.cheksumRx ^= datosComProtocol.bufferRx[datosComProtocol.indexReadRx++];
+                }
+                nBytes--;
+                if(nBytes<=0){
+                    estadoProtocolo=START;
+                    if(datosComProtocol.cheksumRx == datosComProtocol.bufferRx[datosComProtocol.indexReadRx]){
+                        decodeData();
+                    }
+                }
+                break;
+            default:
+                estadoProtocolo=START;
+                break;
+        }
+    }
+    
+
+}
+
+
+/*****************************************************************************************************/
+/************  Función para procesar el comando recibido ***********************/
+void decodeData(void)
+{
+    uint8_t auxBuffTx[50], indiceAux=0, cheksum;
+    auxBuffTx[indiceAux++]='U';
+    auxBuffTx[indiceAux++]='N';
+    auxBuffTx[indiceAux++]='E';
+    auxBuffTx[indiceAux++]='R';
+    auxBuffTx[indiceAux++]=0;
+    auxBuffTx[indiceAux++]=':';
+
+    switch (datosComProtocol.payload[1]) {
+        case ALIVE:
+            auxBuffTx[indiceAux++]=ALIVE;
+            auxBuffTx[indiceAux++]=ACK;
+            auxBuffTx[NBYTES]=0x03;
+            break;
+        case GET_LEDS:
+            auxBuffTx[indiceAux++]=GET_LEDS;
+            myWord.ui16[0]=leds;
+            auxBuffTx[indiceAux++]=myWord.ui8[0];
+            auxBuffTx[indiceAux++]=myWord.ui8[1];
+            auxBuffTx[NBYTES]=0x04;
+            break;
+        case SET_LEDS:
+            auxBuffTx[indiceAux++]=SET_LEDS;
+            numLed=datosComProtocol.payload[2];
+            myLeds[numLed].ledState=datosComProtocol.payload[3];
+            auxBuffTx[NBYTES]=0x02;
+            manejadorLed();
+            break;
+        case BUTTON_EVENT:
+            auxBuffTx[indiceAux++]=BUTTON_EVENT;
+            auxBuffTx[indiceAux++]=indice;
+            auxBuffTx[indiceAux++]=flanco;
+            if(ourButton[indice].estado == BUTTON_DOWN)
+                timerRead.ui32=ourButton[indice].timeDown;
+            if(ourButton[indice].estado == BUTTON_UP)
+                timerRead.ui32=ourButton[indice].timeUP;
+
+            auxBuffTx[indiceAux++]=timerRead.ui8[0];
+            auxBuffTx[indiceAux++]=timerRead.ui8[1];
+            auxBuffTx[indiceAux++]=timerRead.ui8[2];
+            auxBuffTx[indiceAux++]=timerRead.ui8[3];
+            auxBuffTx[NBYTES]= 0x08;
+            break;
+        case BUTTON_STATE:
+            auxBuffTx[indiceAux++]=BUTTON_STATE;
+            myWord.ui16[0]=buttonArray;
+            auxBuffTx[indiceAux++]=myWord.ui8[0];
+            auxBuffTx[indiceAux++]=myWord.ui8[1];
+            auxBuffTx[NBYTES]=0x04;
+            break;
+
         default:
-            startMef(indice);
+            auxBuffTx[indiceAux++]=0xDD;
+            auxBuffTx[NBYTES]=0x02;
             break;
     }
+   cheksum=0;
+   for(uint8_t a=0 ;a < indiceAux ;a++)
+   {
+       cheksum ^= auxBuffTx[a];
+       datosComProtocol.bufferTx[datosComProtocol.indexWriteTx++]=auxBuffTx[a];
+   }
+    datosComProtocol.bufferTx[datosComProtocol.indexWriteTx++]=cheksum;
+
 }
 
-void togleLed(uint8_t indice,uint8_t state){
-    if(state){
-        leds = mask[indice];
+
+/*****************************************************************************************************/
+/************  Función para enviar los bytes hacia la pc ***********************/
+void sendData(void)
+{
+    if(pcCom.writable())
+        pcCom.putc(datosComProtocol.bufferTx[datosComProtocol.indexReadTx++]);
+
+}
+
+
+/*****************************************************************************************************/
+/************  Función para hacer el hearbeats ***********************/
+void hearbeatTask(void)
+{
+    if(hearBeatEvent < NUMBEAT){
+        HEARBEAT=!HEARBEAT;
+        hearBeatEvent++;
     }else{
-        leds=0;
+        HEARBEAT=1;
+        hearBeatEvent = (hearBeatEvent>=25) ? (0) : (hearBeatEvent+1);    
     }
 }
+
+
+/**********************************************************************************/
+/* Servicio de Interrupciones*/
+
+void onDataRx(void)
+{
+    while (pcCom.readable())
+    {
+        datosComProtocol.bufferRx[datosComProtocol.indexWriteRx++]=pcCom.getc();
+    }
+}
+
+void OnTimeOut(void)
+{
+    if(!myFlags.individualFlags.checkButtons)
+        myFlags.individualFlags.checkButtons=true;
+} 
